@@ -1,6 +1,7 @@
+import warnings
+
 import torch
 from torch import nn, optim
-import warnings
 
 
 class CellEmbed(nn.Module):
@@ -84,14 +85,31 @@ class CellInteract(nn.Module):
         self.transform = nn.Parameter(torch.zeros((d_embed, d_embed)))
         self.scale = torch.nn.Sigmoid()
         # self.lr_mask = torch.tensor(lr_mask, dtype=torch.float32).to(device)
+        self.lasso_reg = None
+
+    def resetCellInteraction(self, init_method='kaiming_normal', **kwargs):
+        assert init_method in ['kaiming_normal', 'kaiming_uniform', 'xavier_normal', 'xavier_uniform'], "Unknown init method."
+        if init_method == 'kaiming_normal':
+            nn.init.kaiming_normal_(self.transform)
+        elif init_method == 'kaiming_uniform':
+            nn.init.kaiming_uniform_(self.transform)
+        elif init_method == 'xavier_normal':
+            nn.init.xavier_normal_(self.transform)
+        elif init_method == 'xavier_uniform':
+            nn.init.xavier_uniform_(self.transform)
 
     def forward(self, expression, encoding):
         cell_interaction = self.scale(encoding @ self.transform @ encoding.transpose(-1, -2))
+        
         return cell_interaction @ expression @ (self.gene_response) / expression.shape[1]
+
+    def getLassoReg(self):
+        self.lasso_reg = torch.sum(torch.abs(self.transform))
+        return self.lasso_reg
 
 
 class Model(nn.Module):
-    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int):
+    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int, lbd: float=1.0, lbdCI=0.5):
         """The entire model
 
         :param d_gene: number of genes
@@ -106,6 +124,11 @@ class Model(nn.Module):
         self.cell_denoise = CellDenoise([d_gene] + d_denoise + [d_gene])
         self.cell_smooth = CellSmooth()
         self.cell_interacts = nn.ModuleList([CellInteract(d_gene, d_embed[-1]) for i in range(n_heads)])
+        for moduleCI in self.cell_interacts:
+            moduleCI.resetCellInteraction(init_method='xavier_normal')
+
+        self.lbd = lbd
+        self.lbdCI = lbdCI
 
     def forward(self, raw_expr, interact=False):
         denoised_expr = self.cell_denoise(raw_expr)
@@ -116,7 +139,7 @@ class Model(nn.Module):
         smoothed_expr = self.cell_smooth(denoised_expr, cell_embedding, cell_quality)
 
         if interact:
-            final_expr = smoothed_expr + sum(f(smoothed_expr, cell_embedding) for f in self.cell_interacts)
+            final_expr = smoothed_expr + self.lbd * sum(f(smoothed_expr, cell_embedding) for f in self.cell_interacts)
             return denoised_expr, smoothed_expr, final_expr
         else:
             return denoised_expr, smoothed_expr
@@ -202,9 +225,12 @@ class Model(nn.Module):
                 res = self(X2, what != 'final')[what]
                 regression_loss = regression_criterion(res[:, cell_mask == 1, :][:, :, gene_mask == 1],
                                                        X[:, cell_mask == 1, :][:, :, gene_mask == 1])
+                loss_optim = regression_loss
+                for headCI in self.cell_interacts:
+                    loss_optim += self.lbdCI * headCI.getLassoReg()
 
                 optimizer.zero_grad()
-                regression_loss.backward()
+                loss_optim.backward()
                 optimizer.step()
 
                 temp_mse += regression_loss.detach().to('cpu').item()
