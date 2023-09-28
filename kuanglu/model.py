@@ -80,8 +80,8 @@ class CellInteract(nn.Module):
         :param d_embed: dimensionality of input cell embedding
         """
         super(CellInteract, self).__init__()
-        self.gene_response = nn.Parameter(torch.zeros((d_gene, d_gene)))
-        self.transform = nn.Parameter(torch.zeros((d_embed, d_embed)))
+        self.gene_response = nn.Parameter(torch.randn((d_gene, d_gene)))
+        self.transform = nn.Parameter(torch.randn((d_embed, d_embed)))
         self.scale = torch.nn.Sigmoid()
         # self.lr_mask = torch.tensor(lr_mask, dtype=torch.float32).to(device)
 
@@ -116,7 +116,7 @@ class Model(nn.Module):
         smoothed_expr = self.cell_smooth(denoised_expr, cell_embedding, cell_quality)
 
         if interact:
-            final_expr = smoothed_expr + sum(f(smoothed_expr, cell_embedding) for f in self.cell_interacts)
+            final_expr = smoothed_expr + sum(f(smoothed_expr, cell_embedding) for f in self.cell_interacts) / len(self.cell_interacts)
             return denoised_expr, smoothed_expr, final_expr
         else:
             return denoised_expr, smoothed_expr
