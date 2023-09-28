@@ -91,20 +91,30 @@ class CellInteract(nn.Module):
         assert init_method in ['kaiming_normal', 'kaiming_uniform', 'xavier_normal', 'xavier_uniform'], "Unknown init method."
         if init_method == 'kaiming_normal':
             nn.init.kaiming_normal_(self.transform)
+            nn.init.kaiming_normal_(self.gene_response)
         elif init_method == 'kaiming_uniform':
             nn.init.kaiming_uniform_(self.transform)
+            nn.init.kaiming_uniform_(self.gene_response)
         elif init_method == 'xavier_normal':
             nn.init.xavier_normal_(self.transform)
+            nn.init.xavier_normal_(self.gene_response)
         elif init_method == 'xavier_uniform':
             nn.init.xavier_uniform_(self.transform)
+            nn.init.xavier_uniform_(self.gene_response)
 
     def forward(self, expression, encoding):
         cell_interaction = self.scale(encoding @ self.transform @ encoding.transpose(-1, -2))
         
         return cell_interaction @ expression @ (self.gene_response) / expression.shape[1]
 
-    def getLassoReg(self):
-        self.lasso_reg = torch.sum(torch.abs(self.transform))
+    def getLassoReg(self, type='V'):
+        assert type in ['V', 'C', 'VC'], "Undefined param of lasso regularization."
+        self.lasso_reg = torch.tensor(0., dtype=torch.float32).to(self.gene_response.device)
+        type = [char for char in type]
+        if 'V' in type:
+            self.lasso_reg = self.lasso_reg + torch.sum(torch.abs(self.gene_response))
+        if 'C' in type:
+            self.lasso_reg = self.lasso_reg + torch.sum(torch.abs(self.transform))
         return self.lasso_reg
 
 
@@ -146,7 +156,7 @@ class Model(nn.Module):
 
     def fit(self, what, train_loader, validate_loader, epochs, device='cuda',
             cell_masking_rate=0.3, gene_masking_rate=0.6,
-            validate_per=1, lr=1e-3, l2_reg=1e-4, fix=None):
+            validate_per=1, lr=1e-3, l2_reg=1e-4, fix=None, lassoW='V'):
         """Fit the model
 
         :param what: train which part of the network? Either 'denoised', 'smoothed', or 'final'
@@ -227,7 +237,7 @@ class Model(nn.Module):
                                                        X[:, cell_mask == 1, :][:, :, gene_mask == 1])
                 loss_optim = regression_loss
                 for headCI in self.cell_interacts:
-                    loss_optim += self.lbdCI * headCI.getLassoReg()
+                    loss_optim += self.lbdCI * headCI.getLassoReg(type=lassoW)
 
                 optimizer.zero_grad()
                 loss_optim.backward()
