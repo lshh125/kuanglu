@@ -1,25 +1,86 @@
+import sys
 import warnings
+from typing import Dict, List, Union
 
 import torch
 from torch import nn, optim
 
+from kuanglu.model_utils import EncoderBlock
+
+# from logging import warning
 
 class CellEmbed(nn.Module):
-    def __init__(self, d):
+    def __init__(self, embedType='transformer', **kwargs):
         """Generate cell Embedding
 
-        :param d: list of dimensionality of layers. The first number must be the number of genes.
+        :param embedType: 'transformer' or 'ff'
+        :param kwargs: other parameters for the embedding, 'ldim' for ff, 
+            n_layers, n_heads, d_model, d_ff, dropout for transformer, default to 2, 4, 128, 512, 0.1
         """
         super(CellEmbed, self).__init__()
-        layers = []
-        for i in range(len(d) - 1):
-            layers.append(nn.Linear(d[i], d[i + 1]))
-            if i < len(d) - 2:
-                layers.append(nn.Tanh())
-        self.ff = nn.Sequential(*layers)
+        
+        assert embedType in ['transformer', 'ff'], "Unknown embedding type."
+        self.embedType = embedType
+        
+        if embedType == 'transformer':
+            if kwargs['default'] == False:
+                assert 'n_layers' in kwargs, "Must provide n_layers for transformer embedding."
+                assert 'n_heads' in kwargs, "Must provide n_heads for transformer embedding."
+                assert 'd_input' in kwargs, "Must provide d_input for transformer embedding."
+                assert 'd_model' in kwargs, "Must provide d_model for transformer embedding."
+                assert 'd_ff' in kwargs, "Must provide d_ff for transformer embedding."
+                assert 'dropout' in kwargs, "Must provide dropout for transformer embedding."
+                n_layers = kwargs['n_layers']
+                n_heads = kwargs['n_heads']
+                d_input = kwargs['d_input']
+                d_model = kwargs['d_model']
+                d_ff = kwargs['d_ff']
+                dropout = kwargs['dropout']
+            n_layers = 2 if 'n_layers' not in kwargs else kwargs['n_layers']
+            n_heads = 4 if 'n_heads' not in kwargs else kwargs['n_heads']
+            d_input = 128 if 'd_input' not in kwargs else kwargs['d_input']
+            d_model = 128 if 'd_model' not in kwargs else kwargs['d_model']
+            d_ff = 512 if 'd_ff' not in kwargs else kwargs['d_ff']
+            dropout = 0.1 if 'dropout' not in kwargs else kwargs['dropout']
+            
+            self.net = nn.Sequential(*([nn.Linear(d_input, d_model)] + 
+                                       [EncoderBlock(d_model, n_heads, dropout, d_ff) for _ in range(n_layers)]))
+            
+        elif embedType == 'ff':
+            assert 'ldim' in kwargs, "Must provide ldim for ff embedding."
+            d = kwargs['ldim']
+            layers = []
+            for i in range(len(d) - 1):
+                layers.append(nn.Linear(d[i], d[i + 1]))
+                if i < len(d) - 2:
+                    layers.append(nn.Tanh())
+            self.net = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.ff(x)
+        return self.net(x)
+    
+    def resetEmbedding(self, init_method='kaiming_normal', **kwargs):
+        assert init_method in ['kaiming_normal', 'kaiming_uniform', 'xavier_normal', 'xavier_uniform'], "Unknown init method."
+        if init_method == 'kaiming_normal':
+            for module in self.net:
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_normal_(module.weight)
+        elif init_method == 'kaiming_uniform':
+            for module in self.net:
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_uniform_(module.weight)
+        elif init_method == 'xavier_normal':
+            for module in self.net:
+                if isinstance(module, nn.Linear):
+                    nn.init.xavier_normal_(module.weight)
+        elif init_method == 'xavier_uniform':
+            for module in self.net:
+                if isinstance(module, nn.Linear):
+                    nn.init.xavier_uniform_(module.weight)
+                    
+    def dummyForward(self, x):
+        dummyInput = torch.zeros((1,) + x.shape[1:]).to(x.device)
+        return self.net(dummyInput)
 
 
 class CellDenoise(nn.Module):
@@ -119,21 +180,34 @@ class CellInteract(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int, lbd: float=1.0, lbdCI=0.1):
+    def __init__(self, *, 
+                 d_gene: int, 
+                 d_denoise: list, 
+                 d_quality: list, 
+                 n_heads: int, 
+                 lbd: float=1.0, 
+                 lbdCI=0.1,
+                 embed_config: dict={'embedType': 'transformer', 
+                                     'default': True},
+                 ):
         """The entire model
 
         :param d_gene: number of genes
         :param d_denoise: dims of denoise layers (excluding the first and last one, which are always d_gene)
-        :param d_embed: dims of embedding layers (excluding the first one, d_gene)
         :param d_quality: dims of qualify layers (excluding the first one, d_gene, and the last one, 1)
         :param n_heads: number of heads for cell-cell interaction modeling
+        :param lbd: weight of cell-cell interaction
+        :param lbdCI: weight of lasso regularization for cell-cell interaction
+        :param embed_config: configuration for cell embedding, default to {'embedType': 'transformer', 'default': True}
         """
         super(Model, self).__init__()
-        self.cell_embed = CellEmbed([d_gene] + d_embed)
+        
+        self.cell_embed = CellEmbed(**embed_config)
+        embed_dim = self.cell_embed.dummyForward(torch.zeros((1, d_gene))).shape[-1]
         self.cell_qualify = CellQualify([d_gene] + d_quality + [1])
         self.cell_denoise = CellDenoise([d_gene] + d_denoise + [d_gene])
         self.cell_smooth = CellSmooth()
-        self.cell_interacts = nn.ModuleList([CellInteract(d_gene, d_embed[-1]) for i in range(n_heads)])
+        self.cell_interacts = nn.ModuleList([CellInteract(d_gene, embed_dim) for i in range(n_heads)])
         for moduleCI in self.cell_interacts:
             moduleCI.resetCellInteraction(init_method='xavier_normal')
 
