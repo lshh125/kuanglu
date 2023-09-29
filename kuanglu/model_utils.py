@@ -97,6 +97,8 @@ class EncoderBlock(TransformerBlock):
         
 
     def forward(self, x, mask=None):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(0)
         attention = self.attention(x, x, x, mask)
         x = self.dropout(self.layer_norm1(attention + x))
         forward = self.feed_forward(x)

@@ -2,6 +2,7 @@ import sys
 import warnings
 from typing import Dict, List, Union
 
+import numpy as np
 import torch
 from torch import nn, optim
 
@@ -55,7 +56,8 @@ class CellEmbed(nn.Module):
                 if i < len(d) - 2:
                     layers.append(nn.Tanh())
             self.net = nn.Sequential(*layers)
-
+            
+        
     def forward(self, x):
         return self.net(x)
     
@@ -94,7 +96,7 @@ class CellDenoise(nn.Module):
         for i in range(len(d) - 1):
             layers.append(nn.Linear(d[i], d[i + 1]))
             if i < len(d) - 2:
-                layers.append(nn.Tanh())
+                layers.append(nn.ReLU())
         self.ff = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -237,6 +239,15 @@ class Model(nn.Module):
             return denoised_expr, smoothed_expr, final_expr
         else:
             return denoised_expr, smoothed_expr
+        
+    def getCellEmbedding(self, raw_expr):
+        if isinstance(raw_expr, np.ndarray):
+            raw_expr = torch.tensor(raw_expr, dtype=torch.float32, device='cuda')
+        with torch.no_grad():
+            cell_embedding = self.cell_embed(raw_expr).to('cpu').numpy()
+            del raw_expr
+            torch.cuda.empty_cache()
+        return cell_embedding
 
     def fit(self, what, train_loader, validate_loader, epochs, device='cuda',
             cell_masking_rate=0.3, gene_masking_rate=0.6,
@@ -324,7 +335,7 @@ class Model(nn.Module):
                 res = self(X2, what==2, D)[what]
                 regression_loss = regression_criterion(res[:, cell_mask == 1, :][:, :, gene_mask == 1],
                                                        X[:, cell_mask == 1, :][:, :, gene_mask == 1])
-                loss_optim = regression_loss
+                loss_optim = regression_loss + .0
                 for headCI in self.cell_interacts:
                     loss_optim += self.lbdCI * headCI.getLassoReg(type=lassoW)
 
