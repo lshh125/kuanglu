@@ -73,7 +73,7 @@ class CellSmooth(nn.Module):
 
 
 class CellInteract(nn.Module):
-    def __init__(self, d_gene, d_embed):
+    def __init__(self, d_gene, d_embed, length_scale=100.):
         """Model cell-cell interaction by transform the gene expression across both cells and genes.
 
         :param d_gene: number of genes
@@ -83,15 +83,21 @@ class CellInteract(nn.Module):
         self.gene_response = nn.Parameter(torch.zeros((d_gene, d_gene)))
         self.transform = nn.Parameter(torch.zeros((d_embed, d_embed)))
         self.scale = torch.nn.Sigmoid()
+        self.length_scale = nn.Parameter(torch.tensor(length_scale), requires_grad=False)
         # self.lr_mask = torch.tensor(lr_mask, dtype=torch.float32).to(device)
 
-    def forward(self, expression, encoding):
+    def forward(self, expression, encoding, sqr_pdist=None):
         cell_interaction = self.scale(encoding @ self.transform @ encoding.transpose(-1, -2))
-        return cell_interaction @ expression @ (self.gene_response) / expression.shape[1]
+        if sqr_pdist is not None:
+            spatial_scaling = torch.exp(- sqr_pdist / (self.length_scale ** 2))
+            return (spatial_scaling * cell_interaction) @ expression @ (self.gene_response) / expression.shape[1]
+        else:
+            return cell_interaction @ expression @ (self.gene_response) / expression.shape[1]
 
 
 class Model(nn.Module):
-    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int):
+    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int,
+                 length_scale: float = 100.):
         """The entire model
 
         :param d_gene: number of genes
@@ -99,15 +105,19 @@ class Model(nn.Module):
         :param d_embed: dims of embedding layers (excluding the first one, d_gene)
         :param d_quality: dims of qualify layers (excluding the first one, d_gene, and the last one, 1)
         :param n_heads: number of heads for cell-cell interaction modeling
+        :param length_scale: length scales for a Gaussian kernel used for masking cell-cell interactions; not trainable
         """
         super(Model, self).__init__()
         self.cell_embed = CellEmbed([d_gene] + d_embed)
         self.cell_qualify = CellQualify([d_gene] + d_quality + [1])
         self.cell_denoise = CellDenoise([d_gene] + d_denoise + [d_gene])
         self.cell_smooth = CellSmooth()
-        self.cell_interacts = nn.ModuleList([CellInteract(d_gene, d_embed[-1]) for i in range(n_heads)])
+        if isinstance(length_scale, list) and len(length_scale) == n_heads:
+            self.cell_interacts = nn.ModuleList([CellInteract(d_gene, d_embed[-1], i) for i in length_scale])
+        elif isinstance(length_scale, float) or isinstance(length_scale, int):
+            self.cell_interacts = nn.ModuleList([CellInteract(d_gene, d_embed[-1], length_scale) for i in range(n_heads)])
 
-    def forward(self, raw_expr, interact=False):
+    def forward(self, raw_expr, interact, sqr_pdist=None):
         denoised_expr = self.cell_denoise(raw_expr)
 
         cell_quality = self.cell_qualify(raw_expr)
@@ -116,14 +126,14 @@ class Model(nn.Module):
         smoothed_expr = self.cell_smooth(denoised_expr, cell_embedding, cell_quality)
 
         if interact:
-            final_expr = smoothed_expr + sum(f(smoothed_expr, cell_embedding) for f in self.cell_interacts)
+            final_expr = smoothed_expr + sum(f(smoothed_expr, cell_embedding, sqr_pdist) for f in self.cell_interacts) / len(self.cell_interacts)
             return denoised_expr, smoothed_expr, final_expr
         else:
             return denoised_expr, smoothed_expr
 
     def fit(self, what, train_loader, validate_loader, epochs, device='cuda',
             cell_masking_rate=0.3, gene_masking_rate=0.6,
-            validate_per=1, lr=1e-3, l2_reg=1e-4, fix=None):
+            validate_per=1, lr=1e-3, l2_reg=1e-4, fix=None, spatial=False):
         """Fit the model
 
         :param what: train which part of the network? Either 'denoised', 'smoothed', or 'final'
@@ -196,12 +206,17 @@ class Model(nn.Module):
         for epoch in range(*epochs):
             temp_mse = 0.
             for X in train_loader:
+                if spatial:
+                    X, D = X
+                    D = D.to(device)
+                else:
+                    D = None
                 X = X.to(device)
                 X2, cell_mask, gene_mask = masking(X, cell_rate=cell_masking_rate, gene_rate=gene_masking_rate)
 
-                res = self(X2, what != 'final')[what]
+                res = self(X2, what==2, D)[what]
                 regression_loss = regression_criterion(res[:, cell_mask == 1, :][:, :, gene_mask == 1],
-                                                       X[:, cell_mask == 1, :][:, :, gene_mask == 1])
+                                                        X[:, cell_mask == 1, :][:, :, gene_mask == 1])
 
                 optimizer.zero_grad()
                 regression_loss.backward()
@@ -215,11 +230,16 @@ class Model(nn.Module):
                 temp_mse = 0.
                 with torch.no_grad():
                     for X in validate_loader:
+                        if spatial:
+                            X, D = X
+                            D = D.to(device)
+                        else:
+                            D = None
                         X = X.to(device)
                         X2, cell_mask, gene_mask = masking(X, cell_rate=cell_masking_rate, gene_rate=gene_masking_rate)
                         raw_mse.append(regression_criterion(X2[:, cell_mask == 1, :][:, :, gene_mask == 1],
                                                             X[:, cell_mask == 1, :][:, :, gene_mask == 1]).to('cpu').item())
-                        res = self(X2, what != 'final')[what]
+                        res = self(X2, what==2, D)[what]
                         regression_loss = regression_criterion(res[:, cell_mask == 1, :][:, :, gene_mask == 1],
                                                                X[:, cell_mask == 1, :][:, :, gene_mask == 1])
 
@@ -236,6 +256,8 @@ class Model(nn.Module):
         for module in fixed_modules:
             for param in module.parameters():
                 param.requires_grad = True
+        for i in self.cell_interacts:
+            i.length_scale.requires_grad = False
 
         return {'train_epoch': train_epoch, 'train_mse': train_mse,
                 'validate_epoch': validate_epoch, 'validate_mse': validate_mse, 'raw_mse': raw_mse}
