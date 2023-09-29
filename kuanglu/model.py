@@ -156,7 +156,7 @@ class Model(nn.Module):
 
     def fit(self, what, train_loader, validate_loader, epochs, device='cuda',
             cell_masking_rate=0.3, gene_masking_rate=0.6,
-            validate_per=1, lr=1e-3, l2_reg=1e-4, fix=None, lassoW='V'):
+            validate_per=1, lr=1e-3, l2_reg=1e-4, fix=None, lassoW='VC'):
         """Fit the model
 
         :param what: train which part of the network? Either 'denoised', 'smoothed', or 'final'
