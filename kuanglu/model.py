@@ -1,6 +1,7 @@
+import warnings
+
 import torch
 from torch import nn, optim
-import warnings
 
 
 class CellEmbed(nn.Module):
@@ -85,6 +86,22 @@ class CellInteract(nn.Module):
         self.scale = torch.nn.Sigmoid()
         self.length_scale = nn.Parameter(torch.tensor(length_scale), requires_grad=False)
         # self.lr_mask = torch.tensor(lr_mask, dtype=torch.float32).to(device)
+        self.lasso_reg = None
+
+    def resetCellInteraction(self, init_method='kaiming_normal', **kwargs):
+        assert init_method in ['kaiming_normal', 'kaiming_uniform', 'xavier_normal', 'xavier_uniform'], "Unknown init method."
+        if init_method == 'kaiming_normal':
+            nn.init.kaiming_normal_(self.transform)
+            nn.init.kaiming_normal_(self.gene_response)
+        elif init_method == 'kaiming_uniform':
+            nn.init.kaiming_uniform_(self.transform)
+            nn.init.kaiming_uniform_(self.gene_response)
+        elif init_method == 'xavier_normal':
+            nn.init.xavier_normal_(self.transform)
+            nn.init.xavier_normal_(self.gene_response)
+        elif init_method == 'xavier_uniform':
+            nn.init.xavier_uniform_(self.transform)
+            nn.init.xavier_uniform_(self.gene_response)
 
     def forward(self, expression, encoding, sqr_pdist=None):
         cell_interaction = self.scale(encoding @ self.transform @ encoding.transpose(-1, -2))
@@ -94,10 +111,19 @@ class CellInteract(nn.Module):
         else:
             return cell_interaction @ expression @ (self.gene_response) / expression.shape[1]
 
+    def getLassoReg(self, type='V'):
+        assert type in ['V', 'C', 'VC'], "Undefined param of lasso regularization."
+        self.lasso_reg = torch.tensor(0., dtype=torch.float32).to(self.gene_response.device)
+        type = [char for char in type]
+        if 'V' in type:
+            self.lasso_reg = self.lasso_reg + torch.sum(torch.abs(self.gene_response))
+        if 'C' in type:
+            self.lasso_reg = self.lasso_reg + torch.sum(torch.abs(self.transform))
+        return self.lasso_reg
+
 
 class Model(nn.Module):
-    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int,
-                 length_scale: float = 100.):
+    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int, lbd: float=1.0, lbdCI=0.5, length_scale: float = 100.):
         """The entire model
 
         :param d_gene: number of genes
@@ -105,6 +131,8 @@ class Model(nn.Module):
         :param d_embed: dims of embedding layers (excluding the first one, d_gene)
         :param d_quality: dims of qualify layers (excluding the first one, d_gene, and the last one, 1)
         :param n_heads: number of heads for cell-cell interaction modeling
+        :param lbd: ...
+        :param lbdCI: ...
         :param length_scale: length scales for a Gaussian kernel used for masking cell-cell interactions; not trainable
         """
         super(Model, self).__init__()
@@ -116,6 +144,11 @@ class Model(nn.Module):
             self.cell_interacts = nn.ModuleList([CellInteract(d_gene, d_embed[-1], i) for i in length_scale])
         elif isinstance(length_scale, float) or isinstance(length_scale, int):
             self.cell_interacts = nn.ModuleList([CellInteract(d_gene, d_embed[-1], length_scale) for i in range(n_heads)])
+        for moduleCI in self.cell_interacts:
+            moduleCI.resetCellInteraction(init_method='xavier_normal')
+
+        self.lbd = lbd
+        self.lbdCI = lbdCI
 
     def forward(self, raw_expr, interact, sqr_pdist=None):
         denoised_expr = self.cell_denoise(raw_expr)
@@ -126,14 +159,14 @@ class Model(nn.Module):
         smoothed_expr = self.cell_smooth(denoised_expr, cell_embedding, cell_quality)
 
         if interact:
-            final_expr = smoothed_expr + sum(f(smoothed_expr, cell_embedding, sqr_pdist) for f in self.cell_interacts) / len(self.cell_interacts)
+            final_expr = smoothed_expr + self.lbd * sum(f(smoothed_expr, cell_embedding, sqr_pdist) for f in self.cell_interacts)
             return denoised_expr, smoothed_expr, final_expr
         else:
             return denoised_expr, smoothed_expr
 
     def fit(self, what, train_loader, validate_loader, epochs, device='cuda',
             cell_masking_rate=0.3, gene_masking_rate=0.6,
-            validate_per=1, lr=1e-3, l2_reg=1e-4, fix=None, spatial=False):
+            validate_per=1, lr=1e-3, l2_reg=1e-4, fix=None, lassoW='VC', spatial=False):
         """Fit the model
 
         :param what: train which part of the network? Either 'denoised', 'smoothed', or 'final'
@@ -216,10 +249,13 @@ class Model(nn.Module):
 
                 res = self(X2, what==2, D)[what]
                 regression_loss = regression_criterion(res[:, cell_mask == 1, :][:, :, gene_mask == 1],
-                                                        X[:, cell_mask == 1, :][:, :, gene_mask == 1])
+                                                       X[:, cell_mask == 1, :][:, :, gene_mask == 1])
+                loss_optim = regression_loss
+                for headCI in self.cell_interacts:
+                    loss_optim += self.lbdCI * headCI.getLassoReg(type=lassoW)
 
                 optimizer.zero_grad()
-                regression_loss.backward()
+                loss_optim.backward()
                 optimizer.step()
 
                 temp_mse += regression_loss.detach().to('cpu').item()
@@ -256,8 +292,6 @@ class Model(nn.Module):
         for module in fixed_modules:
             for param in module.parameters():
                 param.requires_grad = True
-        for i in self.cell_interacts:
-            i.length_scale.requires_grad = False
 
         return {'train_epoch': train_epoch, 'train_mse': train_mse,
                 'validate_epoch': validate_epoch, 'validate_mse': validate_mse, 'raw_mse': raw_mse}
