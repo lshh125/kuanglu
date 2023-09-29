@@ -119,7 +119,7 @@ class CellInteract(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int, lbd: float=1.0, lbdCI=0.5):
+    def __init__(self, *, d_gene: int, d_denoise: list, d_embed: list, d_quality: list, n_heads: int, lbd: float=1.0, lbdCI=0.1):
         """The entire model
 
         :param d_gene: number of genes
