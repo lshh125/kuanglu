@@ -224,7 +224,7 @@ class Model(nn.Module):
         for module in fixed_modules:
             for param in module.parameters():
                 if not param.requires_grad:
-                    warnings.warn("Some parameters are already fixed. They will be unfixed when exiting this function.")
+                    warnings.warn(f"{param} is already fixed. They will be unfixed when exiting this function.")
                 param.requires_grad = False
 
         optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=l2_reg)
