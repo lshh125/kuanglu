@@ -137,7 +137,7 @@ class CellSmooth(nn.Module):
 
 
 class CellInteract(nn.Module):
-    def __init__(self, d_gene, d_embed, length_scale=100.):
+    def __init__(self, d_gene, d_embed, length_scale=100., symmetric=False):
         """Model cell-cell interaction by transform the gene expression across both cells and genes.
 
         :param d_gene: number of genes
@@ -150,6 +150,7 @@ class CellInteract(nn.Module):
         self.length_scale = nn.Parameter(torch.tensor(length_scale), requires_grad=False)
         # self.lr_mask = torch.tensor(lr_mask, dtype=torch.float32).to(device)
         self.lasso_reg = None
+        self.symmetric = symmetric
 
     def resetCellInteraction(self, init_method='kaiming_normal', **kwargs):
         assert init_method in ['kaiming_normal', 'kaiming_uniform', 'xavier_normal', 'xavier_uniform'], "Unknown init method."
@@ -170,16 +171,25 @@ class CellInteract(nn.Module):
         cell_interaction = self.scale(encoding @ self.transform @ encoding.transpose(-1, -2))
         if sqr_pdist is not None:
             spatial_scaling = torch.exp(- sqr_pdist / (self.length_scale ** 2))
-            return (spatial_scaling * cell_interaction) @ expression @ (self.gene_response) / expression.shape[1]
+            if self.symmetric:
+                return (spatial_scaling * cell_interaction) @ expression @ ((self.gene_response + self.gene_response.T) / 2) / expression.shape[1]
+            else:
+                return (spatial_scaling * cell_interaction) @ expression @ (self.gene_response) / expression.shape[1]
         else:
-            return cell_interaction @ expression @ (self.gene_response) / expression.shape[1]
+            if self.symmetric:
+                return cell_interaction @ expression @ ((self.gene_response + self.gene_response.T) / 2) / expression.shape[1]
+            else:
+                return cell_interaction @ expression @ (self.gene_response) / expression.shape[1]
 
     def getLassoReg(self, type='V'):
         assert type in ['V', 'C', 'VC'], "Undefined param of lasso regularization."
         self.lasso_reg = torch.tensor(0., dtype=torch.float32).to(self.gene_response.device)
         type = [char for char in type]
         if 'V' in type:
-            self.lasso_reg = self.lasso_reg + torch.sum(torch.abs(self.gene_response))
+            if self.symmetric:
+                self.lasso_reg = self.lasso_reg + torch.sum(torch.abs((self.gene_response + self.gene_response.T) / 2))
+            else:
+                self.lasso_reg = self.lasso_reg + torch.sum(torch.abs(self.gene_response))
         if 'C' in type:
             self.lasso_reg = self.lasso_reg + torch.sum(torch.abs(self.transform))
         return self.lasso_reg
