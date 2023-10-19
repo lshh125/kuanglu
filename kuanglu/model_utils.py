@@ -3,6 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class MLP(nn.Module):
+    def __init__(self, input_size, hidden_size_list, output_size, dropout):
+        super(MLP, self).__init__()
+        self.input_size = input_size
+        self.hidden_size_list = hidden_size_list
+        self.output_size = output_size
+        self.dropout = dropout
+        
+        for i in range(len(hidden_size_list)):
+            if i == 0:
+                setattr(self, "fc{}".format(i), nn.Linear(input_size, hidden_size_list[i]))
+            else:
+                setattr(self, "fc{}".format(i), nn.Linear(hidden_size_list[i-1], hidden_size_list[i]))
+                
+        self.fc_out = nn.Linear(hidden_size_list[-1], output_size)
+        
+    def forward(self, x):
+        for i in range(len(self.hidden_size_list)):
+            x = getattr(self, "fc{}".format(i))(x)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout)
+            
+        x = self.fc_out(x)
+        return x
+
+
 class SelfAttention(nn.Module):
     def __init__(self, embed_size, heads):
         super(SelfAttention, self).__init__()
@@ -104,3 +130,35 @@ class EncoderBlock(TransformerBlock):
         forward = self.feed_forward(x)
         out = self.dropout(self.layer_norm2(forward + x))
         return out
+
+
+class AutoEncoderMLP(nn.Module):
+    def __init__(self, encoding_dim_list, decoding_dim_list, dropout):
+        """
+
+        Args:
+            encoding_dim_list (list): input_dim, hidden_dim(s), latent_dim
+            decoding_dim_list (list): latent_dim, hidden_dim(s), output_dim
+            dropout (float): dropout rate
+        """
+        super(AutoEncoderMLP, self).__init__()
+        self.encoding_dim_list = encoding_dim_list
+        self.decoding_dim_list = decoding_dim_list
+        self.dropout = dropout
+        
+        self.encoder = MLP(encoding_dim_list[0], encoding_dim_list[1:-1], encoding_dim_list[-1], dropout)
+        self.decoder = MLP(decoding_dim_list[0], decoding_dim_list[1:-1], decoding_dim_list[-1], dropout)
+        
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+    
+    def encode(self, x):
+        lat = self.encoder(x)
+        return lat
+    
+    def decode(self, lat):
+        x = self.decoder(lat)
+        return x
+
