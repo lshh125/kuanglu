@@ -69,18 +69,10 @@ def poisson_loss(y_true, y_pred):
     return torch.sum(ret) / nelem
 
 
-class NegBinom(nn.Module):
-    def __init__(self):
-        super(NegBinom, self).__init__()
-    
-    def forward(self, y_true, pi, mu, theta):
-        y_pred = pi + (1 - pi) * negative_binomial(y_true, mu, theta)
-        return -torch.sum(torch.log(y_pred + 1e-10)) / _nelem(y_true)
-    
 class NB(nn.Module):
     def __init__(self, theta=None, masking=False, scale_factor=1.0, debug=False):
         # For numerical stability
-        super(NegBinom, self).__init__()
+        super().__init__()
         self.eps = 1e-10
         self.scale_factor = scale_factor
         self.debug = debug
