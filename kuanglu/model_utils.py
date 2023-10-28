@@ -162,3 +162,4 @@ class AutoEncoderMLP(nn.Module):
         x = self.decoder(lat)
         return x
 
+
