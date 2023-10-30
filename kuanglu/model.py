@@ -206,6 +206,7 @@ class Model(nn.Module):
                                      'default': True},
                  spatial_config: dict={'n_heads': 1,
                                        'length_scale': 100.},
+                 arch: str='d->e->q'
                  ):
         """The entire model
 
@@ -218,6 +219,7 @@ class Model(nn.Module):
         :param embed_config: configuration for cell embedding, default to {'embedType': 'transformer', 'default': True}
         :param spatial_config: configuration for spatial interaction, default to {'n_heads': 1, 'length_scale': 100.}
             length_scale: length scales for a Gaussian kernel used for masking cell-cell interactions; not trainable
+        :param arch: architecture of the model, default to 'autoencoder', choices: ['autoencoder', 'mixed']
         """
         super(Model, self).__init__()
         
@@ -235,12 +237,63 @@ class Model(nn.Module):
 
         self.lbd = lbd
         self.lbdCI = lbdCI
+        self.arch = arch
 
-    def forward(self, raw_expr, interact, sqr_pdist=None):
-        denoised_expr = self.cell_denoise(raw_expr)
-
-        cell_quality = self.cell_qualify(raw_expr)
-        cell_embedding = self.cell_embed(raw_expr)
+    def forward(self, raw_expr, interact, sqr_pdist=None):      
+          
+        if self.arch == 'd->e->q(ae)':
+            
+            # serial architecture:
+            #   X_denoised = denoise(X_raw)
+            #   Z = embed(X_denoised)
+            #   q = qualify(Z)
+            
+            denoised_expr = self.cell_denoise(raw_expr)
+            cell_embedding = self.cell_embed(denoised_expr)
+            cell_quality = self.cell_qualify(cell_embedding)
+        
+        elif self.arch == 'd->e->q(non-ae)':
+            
+            # serial architecture:
+            #   X_denoised = denoise(X_raw)
+            #   Z = embed(X_denoised)
+            #   q = qualify(Z)
+            
+            denoised_expr = self.cell_denoise(raw_expr)
+            cell_embedding = self.cell_embed(denoised_expr)
+            cell_quality = self.cell_qualify(cell_embedding)
+            
+        elif self.arch == 'd->eq':
+            
+            # X -> X_de -> Z -> X_rec
+            #        |
+            #        +---> q
+            
+            denoised_expr = self.cell_denoise(raw_expr)
+            cell_quality = self.cell_qualify(denoised_expr)
+            cell_embedding = self.cell_embed(denoised_expr)
+            
+        elif self.arch == 'd(e->q)':
+            
+            # X -> X_de
+            # |
+            # +--> Z -> q
+            #      |
+            #      +--> X_rec
+            
+            denoised_expr = self.cell_denoise(raw_expr)
+            cell_embedding = self.cell_embed(raw_expr)
+            cell_quality = self.cell_qualify(cell_embedding)
+            
+        elif self.arch == 'e(d->q)':
+            
+            # X -> Z -> X_rec
+            # |
+            # +--> X_de -> q
+            
+            denoised_expr = self.cell_denoise(raw_expr)
+            cell_embedding = self.cell_embed(raw_expr)
+            cell_quality = self.cell_qualify(denoised_expr)
 
         smoothed_expr = self.cell_smooth(denoised_expr, cell_embedding, cell_quality)
 
@@ -249,6 +302,20 @@ class Model(nn.Module):
             return denoised_expr, smoothed_expr, final_expr
         else:
             return denoised_expr, smoothed_expr
+    
+    # def forward(self, raw_expr, interact, sqr_pdist=None):
+    #     denoised_expr = self.cell_denoise(raw_expr)
+        
+    #     cell_quality = self.cell_qualify(raw_expr)
+    #     cell_embedding = self.cell_embed(raw_expr)
+
+    #     smoothed_expr = self.cell_smooth(denoised_expr, cell_embedding, cell_quality)
+
+    #     if interact:
+    #         final_expr = smoothed_expr + self.lbd * sum(f(smoothed_expr, cell_embedding, sqr_pdist) for f in self.cell_interacts) / len(self.cell_interacts)
+    #         return denoised_expr, smoothed_expr, final_expr
+    #     else:
+    #         return denoised_expr, smoothed_expr
         
     def getCellEmbedding(self, raw_expr):
         if isinstance(raw_expr, np.ndarray):
@@ -390,3 +457,5 @@ class Model(nn.Module):
 
         return {'train_epoch': train_epoch, 'train_mse': train_mse,
                 'validate_epoch': validate_epoch, 'validate_mse': validate_mse, 'raw_mse': raw_mse}
+
+
