@@ -49,6 +49,14 @@ def _reduce_mean(x):
     x = _nan2zero(x)
     return torch.sum(x) / nelem
 
+def masking(X, *, cell_rate=.6, gene_rate=.6, copy=True, device='cuda'):
+    if copy:
+        X = X.clone()
+    row_mask = (torch.rand((X.shape[-2], 1)) < cell_rate) + 0.
+    col_mask = (torch.rand((1, X.shape[-1])) < gene_rate) + 0.
+    mask = 1 - (row_mask * col_mask).to(device)
+    return X * mask, row_mask.squeeze(), col_mask.squeeze()
+
 
 # losses:
 

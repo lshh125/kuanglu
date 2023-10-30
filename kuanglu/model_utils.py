@@ -2,14 +2,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+_activation = {
+    'relu': nn.ReLU,
+    'sigmoid': nn.Sigmoid,
+    'tanh': nn.Tanh,
+}
+
 
 class MLP(nn.Module):
-    def __init__(self, input_size, hidden_size_list, output_size, dropout):
+    def __init__(self, input_size, hidden_size_list, output_size, dropout, activation):
         super(MLP, self).__init__()
         self.input_size = input_size
         self.hidden_size_list = hidden_size_list
         self.output_size = output_size
         self.dropout = dropout
+        assert activation in ['relu', 'sigmoid', 'tanh'], "Unknown activation function."
+        self.activation = _activation[activation]
         
         for i in range(len(hidden_size_list)):
             if i == 0:
@@ -22,7 +30,7 @@ class MLP(nn.Module):
     def forward(self, x):
         for i in range(len(self.hidden_size_list)):
             x = getattr(self, "fc{}".format(i))(x)
-            x = F.relu(x)
+            x = self.activation(x)
             x = F.dropout(x, p=self.dropout)
             
         x = self.fc_out(x)
@@ -130,6 +138,13 @@ class EncoderBlock(TransformerBlock):
         forward = self.feed_forward(x)
         out = self.dropout(self.layer_norm2(forward + x))
         return out
+    
+
+class DecoderBlock(TransformerBlock):
+    def __init__(self, embed_size, heads, dropout, d_ff):
+        super(DecoderBlock, self).__init__(embed_size, heads, dropout, d_ff)
+        
+        raise NotImplementedError("DecoderBlock is not implemented yet.")
 
 
 class AutoEncoderMLP(nn.Module):
