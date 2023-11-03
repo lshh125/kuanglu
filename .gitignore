@@ -168,3 +168,6 @@ cython_debug/
 # dataset
 
 */data/*
+*.gz
+*.zip
+*.tar
